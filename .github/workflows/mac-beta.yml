@@ -1,0 +1,41 @@
+name: Mac kapali test paketleri
+on:
+  workflow_dispatch:
+    inputs:
+      github_client_id:
+        description: GitHub App Client ID (gizli anahtar degil)
+        required: false
+        type: string
+permissions:
+  contents: read
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Incelenmis kaynaklari ac
+        run: unzip -q Mac-Derleme-Kaynagi-20261011-003607.zip 'outputs/*' -d .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Bagimliliklari kur
+        working-directory: outputs/KisiselAsistan.Mac
+        run: npm ci
+      - name: Mac paketini olustur
+        working-directory: outputs/KisiselAsistan.Mac
+        env:
+          ASSISTANT_GITHUB_CLIENT_ID: ${{ inputs.github_client_id }}
+        run: node build.mjs --${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KisiselAsistan-Mac-${{ matrix.arch }}
+          path: outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*
+          if-no-files-found: error
+          retention-days: 14

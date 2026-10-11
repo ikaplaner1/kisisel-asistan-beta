@@ -39,3 +39,20 @@ jobs:
           path: outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*
           if-no-files-found: error
           retention-days: 14
+  release-assets:
+    needs: mac
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: KisiselAsistan-Mac-*
+          merge-multiple: true
+          path: mac-packages
+      - name: Mac kurulumlarini mevcut taslaga ekle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload v0.1.0-beta.1 mac-packages/*.dmg mac-packages/*.zip --clobber

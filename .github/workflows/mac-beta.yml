@@ -39,7 +39,10 @@ jobs:
       - name: DMG ve ZIP imzalarini ve gercek acilisi test et
         working-directory: outputs/KisiselAsistan.Mac
         run: |
+          node -e 'const fs=require("fs");const p="verify-release.mjs";fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace("if(r.error)throw r.error;","console.log({cmd,status:r.status,signal:r.signal,error:r.error});if(r.error)throw r.error;"));'
           node verify-release.mjs --${{ matrix.arch }} || {
+            sleep 5
+            /usr/bin/log show --last 2m --style compact --predicate 'process == "amfid" OR process == "taskgated-helper" OR process == "syspolicyd" OR process == "ReportCrash"' | tail -n 180
             find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -name '*.ips' -exec cat {} \;
             exit 1
           }

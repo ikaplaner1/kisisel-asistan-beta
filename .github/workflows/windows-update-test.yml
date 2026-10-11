@@ -1,0 +1,71 @@
+name: Windows beta update validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Download and validate published beta.2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release download v0.1.0-beta.2 --dir release --pattern '*.exe' --pattern '*.nupkg' --pattern '*.json' --pattern 'RELEASES-beta'
+          if ($LASTEXITCODE) { throw 'Release download failed' }
+          $meta = gh api repos/$env:GH_REPO/releases/tags/v0.1.0-beta.2 | ConvertFrom-Json
+          foreach ($file in Get-ChildItem release -File) {
+            $asset = $meta.assets | Where-Object name -eq $file.Name
+            if ($asset.size -ne $file.Length -or $asset.digest -ne ('sha256:' + (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant())) { throw 'Checksum mismatch' }
+            Write-Output "HASH PASS: $($file.Name)"
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::ExtractToDirectory((Get-ChildItem release -Filter *.nupkg).FullName, "$pwd/unpacked")
+          foreach ($check in @('--self-test','--routine-test','--google-calendar-error-test','--beta-release-test')) {
+            $p = Start-Process "$pwd/unpacked/lib/app/KisiselAsistan.exe" -ArgumentList $check -WorkingDirectory $pwd -WindowStyle Hidden -PassThru
+            if (!$p.WaitForExit(60000)) { $p.Kill(); throw "Timeout: $check" }
+            if ($p.ExitCode -ne 0) { throw "Failed: $check" }
+            Write-Output "PACKAGED PASS: $check"
+          }
+      - name: Test actual GitHub update feed with beta.1 and beta.2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory probe | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><PackageReference Include="Velopack" Version="1.2.161" /></ItemGroup></Project>
+          '@ | Set-Content probe/Probe.csproj
+          @'
+          using Velopack;
+          using Velopack.Locators;
+          using Velopack.Sources;
+          var repo = "https://github.com/" + Environment.GetEnvironmentVariable("GH_REPO");
+          var token = Environment.GetEnvironmentVariable("GH_TOKEN");
+          var cache = Path.GetFullPath("update-cache"); Directory.CreateDirectory(cache);
+          var options = new UpdateOptions { ExplicitChannel = "beta" };
+          var old = new TestVelopackLocator("KisiselAsistan.Beta", "0.1.0-beta.1", cache, null);
+          var manager = new UpdateManager(new GithubSource(repo, token, prerelease: true), options, old);
+          var update = await manager.CheckForUpdatesAsync() ?? throw new Exception("No update found");
+          if (update.TargetFullRelease.Version.ToString() != "0.1.0-beta.2") throw new Exception("Unexpected version");
+          await manager.DownloadUpdatesAsync(update);
+          var package = Path.Combine(cache, update.TargetFullRelease.FileName);
+          if (!File.Exists(package)) throw new Exception("Update package missing");
+          var original = Directory.GetFiles("release", "*.nupkg").Single();
+          using var s1 = File.OpenRead(package); using var s2 = File.OpenRead(original);
+          if (!System.Security.Cryptography.SHA256.HashData(s1).SequenceEqual(System.Security.Cryptography.SHA256.HashData(s2))) throw new Exception("Downloaded update differs from published package");
+          Console.WriteLine("PASS: GitHub beta.1 -> beta.2 detection and verified download");
+          var currentCache = Path.Combine(cache, "current"); Directory.CreateDirectory(currentCache);
+          var current = new TestVelopackLocator("KisiselAsistan.Beta", "0.1.0-beta.2", currentCache, null);
+          var upToDate = new UpdateManager(new GithubSource(repo, token, prerelease: true), options, current);
+          if (await upToDate.CheckForUpdatesAsync() is not null) throw new Exception("beta.2 should be current");
+          Console.WriteLine("PASS: beta.2 does not re-download itself");
+          '@ | Set-Content probe/Program.cs
+          dotnet run --project probe/Probe.csproj
+          if ($LASTEXITCODE) { throw 'Update feed test failed' }

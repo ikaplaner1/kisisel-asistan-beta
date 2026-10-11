@@ -1,24 +1,27 @@
-name: Mac kapali test paketleri
+name: Mac imza ve acilis dogrulamasi
 on:
   workflow_dispatch:
-    inputs:
-      github_client_id:
-        description: GitHub App Client ID (gizli anahtar degil)
-        required: false
-        type: string
 permissions:
   contents: read
+concurrency:
+  group: mac-beta-release
+  cancel-in-progress: false
 jobs:
   mac:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x64]
-    runs-on: macos-latest
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Incelenmis kaynaklari ac
-        run: unzip -q Mac-Derleme-Kaynagi-20261011-003607.zip 'outputs/*' -d .
+        run: unzip -q Mac-Derleme-Kaynagi-0.1.0-beta.3.zip 'outputs/*' -d .
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -28,18 +31,28 @@ jobs:
       - name: Bagimliliklari kur
         working-directory: outputs/KisiselAsistan.Mac
         run: npm ci
-      - name: Mac paketini olustur
+      - name: Imzali Mac paketini olustur
         working-directory: outputs/KisiselAsistan.Mac
         env:
-          ASSISTANT_GITHUB_CLIENT_ID: ${{ inputs.github_client_id }}
+          ASSISTANT_GITHUB_CLIENT_ID: Iv23liM1yilkR8XUb1XI
         run: node build.mjs --${{ matrix.arch }}
+      - name: DMG ve ZIP imzalarini ve gercek acilisi test et
+        working-directory: outputs/KisiselAsistan.Mac
+        run: node verify-release.mjs --${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Mac-test-${{ matrix.arch }}
+          path: outputs/KisiselAsistan.Mac/verification/
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
-          name: KisiselAsistan-Mac-${{ matrix.arch }}
-          path: outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*
+          name: Mac-package-${{ matrix.arch }}
+          path: |
+            outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*.dmg
+            outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*.zip
           if-no-files-found: error
-          retention-days: 14
-  release-assets:
+  release:
     needs: mac
     runs-on: ubuntu-latest
     permissions:
@@ -47,12 +60,33 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: KisiselAsistan-Mac-*
+          pattern: Mac-package-*
           merge-multiple: true
-          path: mac-packages
-      - name: Mac kurulumlarini mevcut taslaga ekle
+          path: packages
+      - name: Dogrulanmis Mac surumunu yayinla
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          gh release upload v0.1.0-beta.1 mac-packages/*.dmg mac-packages/*.zip --clobber
+          cd packages
+          test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 2
+          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
+          sha256sum *.dmg *.zip > SHA256SUMS.txt
+          cat > notes.md <<'NOTES'
+          macOS paket imzasi duzeltmesi. Windows surumu bu yayinda yer almiyor.
+
+          M1/M2/M3/M4 ve diger Apple Silicon Mac: mac-arm64.dmg
+          Intel Mac: mac-x64.dmg
+
+          Eski uygulamayi kapatip Applications icindeki kopyasini bu surumle degistirin. Kisisel verileri silmeyin.
+
+          Her iki mimaride DMG ve ZIP acildi; uygulama ve servis imzalari, arayuz ve servis acilisi otomatik olarak test edildi. Test ekran goruntuleri Actions kaydinda.
+
+          Paketler ad-hoc imzalidir; Apple Developer ID ve notarizasyon yoktur. macOS gelistirici onayi isteyebilir. Mikrofon, hesap girisleri ve gunluk kullanim icin gercek kullanici testi gerekir.
+          NOTES
+          gh release create v0.1.0-beta.3 *.dmg *.zip SHA256SUMS.txt --prerelease --target "$SOURCE_COMMIT" --title "Kisisel Asistan 0.1.0-beta.3 - macOS imza duzeltmesi" --notes-file notes.md
+          mkdir downloaded
+          gh release download v0.1.0-beta.3 --dir downloaded --pattern '*.dmg' --pattern '*.zip' --pattern SHA256SUMS.txt
+          cd downloaded
+          sha256sum --check SHA256SUMS.txt

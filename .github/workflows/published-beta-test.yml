@@ -1,0 +1,113 @@
+name: Published beta validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_REPO: ${{ github.repository }}
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download published Windows files
+        shell: pwsh
+        run: |
+          gh release download v0.1.0-beta.1 --dir release --pattern "*.exe" --pattern "*.nupkg" --pattern "*.json" --pattern "RELEASES-beta" --pattern "KisiselAsistan-SesPaketi.zip"
+          if ($LASTEXITCODE) { throw "Download failed" }
+          gh api repos/$env:GH_REPO/releases/tags/v0.1.0-beta.1 > release-metadata.json
+      - name: Validate hashes and packaged Windows tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $meta = Get-Content release-metadata.json -Raw | ConvertFrom-Json
+          foreach ($file in Get-ChildItem release -File) {
+            $asset = $meta.assets | Where-Object name -eq $file.Name
+            if (!$asset -or $asset.size -ne $file.Length -or $asset.digest -ne ("sha256:" + (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant())) { throw "Asset verification failed: $($file.Name)" }
+            Write-Output "HASH PASS: $($file.Name)"
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pkg = (Get-ChildItem release -Filter *.nupkg).FullName
+          [IO.Compression.ZipFile]::ExtractToDirectory($pkg, "$pwd/unpacked")
+          $app = Join-Path $pwd "unpacked/lib/app"
+          $config = Get-Content "$app/beta-release.json" -Raw | ConvertFrom-Json
+          if ($config.githubClientId -ne "Iv23liM1yilkR8XUb1XI") { throw "GitHub configuration missing" }
+          $bad = Get-ChildItem $app -Recurse -File | Where-Object Name -Match "account.(bin|json)$|client_secret|credentials|reminders.json|steam-watches|planning-preferences|ollama-settings"
+          if ($bad) { throw "Personal data found in package" }
+          foreach ($check in @("--self-test", "--google-calendar-error-test", "--beta-release-test")) {
+            $p = Start-Process "$app/KisiselAsistan.exe" -ArgumentList $check -WorkingDirectory $pwd -WindowStyle Hidden -PassThru
+            if (!$p.WaitForExit(60000)) { $p.Kill(); throw "Timeout: $check" }
+            if ($p.ExitCode -ne 0) { throw "Test failed: $check ($($p.ExitCode))" }
+            Write-Output "PACKAGED TEST PASS: $check"
+          }
+          $speech = [IO.Compression.ZipFile]::OpenRead((Get-Item release/KisiselAsistan-SesPaketi.zip).FullName)
+          try {
+            $entry = $speech.GetEntry("ggml-small-q5_1.bin")
+            if (!$entry -or $entry.Length -lt 100000000) { throw "Speech model missing" }
+            $stream = $entry.Open(); $sha = [Security.Cryptography.SHA256]::Create()
+            try { $digest = [Convert]::ToHexString($sha.ComputeHash($stream)) } finally { $stream.Dispose(); $sha.Dispose() }
+            $reader = [IO.StreamReader]::new($speech.GetEntry("SesModeliniKur.ps1").Open())
+            try { $installer = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if (!$installer.Contains($digest)) { throw "Speech model checksum differs from installer" }
+            Write-Output "SPEECH PACKAGE PASS"
+          } finally { $speech.Dispose() }
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Download and verify published Mac assets
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          gh release download v0.1.0-beta.1 --dir release --pattern "*-mac-$ARCH.zip" --pattern "*-mac-$ARCH.dmg"
+          gh api "repos/$GH_REPO/releases/tags/v0.1.0-beta.1" > release-metadata.json
+          python3 - <<'PY'
+          import json,hashlib,pathlib
+          assets={a["name"]:a for a in json.load(open("release-metadata.json"))["assets"]}
+          for p in pathlib.Path("release").iterdir():
+              a=assets[p.name]
+              assert p.stat().st_size == a["size"]
+              assert "sha256:"+hashlib.sha256(p.read_bytes()).hexdigest() == a["digest"]
+              print("HASH PASS:",p.name)
+          PY
+          ditto -x -k release/*.zip unpacked
+          hdiutil verify release/*.dmg
+          mkdir mounted
+          hdiutil attach -readonly -nobrowse -mountpoint "$PWD/mounted" release/*.dmg
+          APP=$(find unpacked -maxdepth 1 -name "*.app" -print -quit)
+          DISK_APP=$(find mounted -maxdepth 1 -name "*.app" -print -quit)
+          test -n "$APP" && test -n "$DISK_APP"
+          cmp "$APP/Contents/Resources/app.asar" "$DISK_APP/Contents/Resources/app.asar"
+          cmp "$APP/Contents/Resources/host/Assistant.Host" "$DISK_APP/Contents/Resources/host/Assistant.Host"
+          hdiutil detach "$PWD/mounted"
+          export APP
+          python3 - <<'PY'
+          import json,os,pathlib,plistlib,re
+          p=pathlib.Path(os.environ["APP"]); info=plistlib.load(open(p/"Contents/Info.plist","rb"))
+          assert info["CFBundleShortVersionString"].startswith("0.1.0")
+          assert info.get("NSMicrophoneUsageDescription") and info.get("NSAppleEventsUsageDescription")
+          c=json.load(open(p/"Contents/Resources/host/beta-release.json"))
+          assert c["githubClientId"] == "Iv23liM1yilkR8XUb1XI"
+          bad=[str(f) for f in p.rglob("*") if f.is_file() and re.search(r"account.(bin|json)$|client_secret|credentials|reminders.json|steam-watches|planning-preferences|ollama-settings",f.name,re.I)]
+          assert not bad, bad
+          print("BUNDLE CONFIGURATION, PRIVACY AND DMG/ZIP MATCH PASS")
+          PY
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
+          lipo -verify_arch "$ARCH" "$APP/Contents/MacOS/$EXEC"
+          lipo -verify_arch "$ARCH" "$APP/Contents/Resources/host/Assistant.Host"
+          "$APP/Contents/Resources/host/Assistant.Host" --self-test
+          npm exec --yes --package=@electron/asar@3.4.1 -- asar extract "$APP/Contents/Resources/app.asar" asar-content
+          while IFS= read -r f; do node --check "$f"; done < <(find asar-content -type f | grep -E "[.](js|cjs)$")
+          test -f asar-content/desktop/main.cjs
+          test -f asar-content/desktop/preload.cjs
+          test -f asar-content/ui/index.html
+          test -f asar-content/ui/renderer.js
+          echo "PUBLISHED MAC PACKAGE PASS: $ARCH"

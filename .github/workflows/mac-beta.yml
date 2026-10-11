@@ -38,15 +38,7 @@ jobs:
         run: node build.mjs --${{ matrix.arch }}
       - name: DMG ve ZIP imzalarini ve gercek acilisi test et
         working-directory: outputs/KisiselAsistan.Mac
-        run: |
-          node -e 'const fs=require("fs");const p="verify-release.mjs";fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace("if(r.error)throw r.error;","console.log({cmd,status:r.status,signal:r.signal,error:r.error});if(r.error)throw r.error;"));'
-          node verify-release.mjs --${{ matrix.arch }} || {
-            sleep 20
-            find /var/folders -path '*assistant-package-*/extracted/*.app/Contents/MacOS/*' -type f -print -exec /usr/bin/lldb --batch -o run -o bt -- {} --smoke-test --enable-logging=stderr \; || true
-            /usr/bin/log show --last 2m --style compact --predicate 'process == "amfid" OR process == "taskgated-helper" OR process == "syspolicyd" OR process == "ReportCrash"' | tail -n 180
-            find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports -maxdepth 1 -type f -exec cat {} \;
-            exit 1
-          }
+        run: node verify-release.mjs --${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

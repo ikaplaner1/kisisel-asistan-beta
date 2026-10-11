@@ -101,8 +101,9 @@ jobs:
           print("BUNDLE CONFIGURATION, PRIVACY AND DMG/ZIP MATCH PASS")
           PY
           EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
-          lipo -verify_arch "$ARCH" "$APP/Contents/MacOS/$EXEC"
-          lipo -verify_arch "$ARCH" "$APP/Contents/Resources/host/Assistant.Host"
+          CPU="$ARCH"; if [ "$ARCH" = x64 ]; then CPU=x86_64; fi
+          lipo "$APP/Contents/MacOS/$EXEC" -verify_arch "$CPU"
+          lipo "$APP/Contents/Resources/host/Assistant.Host" -verify_arch "$CPU"
           "$APP/Contents/Resources/host/Assistant.Host" --self-test
           npm exec --yes --package=@electron/asar@3.4.1 -- asar extract "$APP/Contents/Resources/app.asar" asar-content
           while IFS= read -r f; do node --check "$f"; done < <(find asar-content -type f | grep -E "[.](js|cjs)$")

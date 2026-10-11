@@ -38,7 +38,11 @@ jobs:
         run: node build.mjs --${{ matrix.arch }}
       - name: DMG ve ZIP imzalarini ve gercek acilisi test et
         working-directory: outputs/KisiselAsistan.Mac
-        run: node verify-release.mjs --${{ matrix.arch }}
+        run: |
+          node verify-release.mjs --${{ matrix.arch }} || {
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f -name '*.ips' -exec cat {} \;
+            exit 1
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

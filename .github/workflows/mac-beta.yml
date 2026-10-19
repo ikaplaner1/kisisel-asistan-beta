@@ -47,6 +47,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
+          if [ ! -d windows ]; then echo "Windows paketi yok; yalniz Mac paketleri eklenecek."; exit 0; fi
           cd windows
           test "$(ls *Setup.exe | wc -l)" -eq 1
           test "$(ls *-full.nupkg | wc -l)" -eq 1
@@ -91,10 +92,15 @@ jobs:
         working-directory: outputs/KisiselAsistan.Mac
         env:
           ASSISTANT_GITHUB_CLIENT_ID: Iv23liM1yilkR8XUb1XI
-        run: node build.mjs --${{ matrix.arch }}
+        # Hata olursa logun sonu herkese acik "annotation" olarak yazilir (loglar oturum ister).
+        run: |
+          set -o pipefail
+          node build.mjs --${{ matrix.arch }} 2>&1 | tee build.log || { echo "::error title=Mac derleme hatasi::$(grep -v '^\s*$' build.log | tail -25 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
       - name: DMG ve ZIP imzalarini ve gercek acilisi test et
         working-directory: outputs/KisiselAsistan.Mac
-        run: node verify-release.mjs --${{ matrix.arch }}
+        run: |
+          set -o pipefail
+          node verify-release.mjs --${{ matrix.arch }} 2>&1 | tee verify.log || { echo "::error title=Mac acilis testi hatasi::$(grep -v '^\s*$' verify.log | tail -25 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

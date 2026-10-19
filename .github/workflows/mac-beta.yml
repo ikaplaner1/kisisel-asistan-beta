@@ -1,6 +1,13 @@
 name: Mac imza ve acilis dogrulamasi
+# Kaynak: depo kokundeki Mac-Derleme-Kaynagi-<surum>.zip (MacKaynakPaketiniHazirla.ps1 uretir).
+# Once Windows surumu ayni numarayla yayinlanmis olmali; Mac paketleri o yayina eklenir.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Surum (Windows yayiniyla ayni, or. 1.0.1-beta-5)'
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -17,11 +24,16 @@ jobs:
           - arch: x64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Incelenmis kaynaklari ac
-        run: unzip -q Mac-Derleme-Kaynagi-0.1.0-beta.3.zip 'outputs/*' -d .
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in *[!A-Za-z0-9.-]*|'') echo "Gecersiz surum"; exit 1;; esac
+          unzip -q "Mac-Derleme-Kaynagi-$VERSION.zip" 'outputs/*' -d .
+          test "$(node -p "require('./outputs/KisiselAsistan.Mac/package.json').version")" = "$VERSION"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -63,30 +75,19 @@ jobs:
           pattern: Mac-package-*
           merge-multiple: true
           path: packages
-      - name: Dogrulanmis Mac surumunu yayinla
+      - name: Dogrulanmis Mac paketlerini Windows yayinina ekle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          SOURCE_COMMIT: ${{ github.sha }}
+          TAG: v${{ inputs.version }}
         run: |
           cd packages
           test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 2
           test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
-          sha256sum *.dmg *.zip > SHA256SUMS.txt
-          cat > notes.md <<'NOTES'
-          macOS paket imzasi duzeltmesi. Windows surumu bu yayinda yer almiyor.
-
-          M1/M2/M3/M4 ve diger Apple Silicon Mac: mac-arm64.dmg
-          Intel Mac: mac-x64.dmg
-
-          Eski uygulamayi kapatip Applications icindeki kopyasini bu surumle degistirin. Kisisel verileri silmeyin.
-
-          Her iki mimaride DMG ve ZIP acildi; uygulama ve servis imzalari, arayuz ve servis acilisi otomatik olarak test edildi. Test ekran goruntuleri Actions kaydinda.
-
-          Paketler ad-hoc imzalidir; Apple Developer ID ve notarizasyon yoktur. macOS gelistirici onayi isteyebilir. Mikrofon, hesap girisleri ve gunluk kullanim icin gercek kullanici testi gerekir.
-          NOTES
-          gh release create v0.1.0-beta.3 *.dmg *.zip SHA256SUMS.txt --prerelease --target "$SOURCE_COMMIT" --title "Kisisel Asistan 0.1.0-beta.3 - macOS imza duzeltmesi" --notes-file notes.md
+          gh release view "$TAG" > /dev/null || { echo "Once $TAG Windows surumunu yayinla."; exit 1; }
+          sha256sum *.dmg *.zip > SHA256SUMS-mac.txt
+          gh release upload "$TAG" *.dmg *.zip SHA256SUMS-mac.txt --clobber
           mkdir downloaded
-          gh release download v0.1.0-beta.3 --dir downloaded --pattern '*.dmg' --pattern '*.zip' --pattern SHA256SUMS.txt
+          gh release download "$TAG" --dir downloaded --pattern '*.dmg' --pattern '*-mac-*.zip' --pattern SHA256SUMS-mac.txt
           cd downloaded
-          sha256sum --check SHA256SUMS.txt
+          sha256sum --check SHA256SUMS-mac.txt

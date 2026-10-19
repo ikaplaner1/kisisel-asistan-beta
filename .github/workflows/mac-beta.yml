@@ -1,20 +1,65 @@
-name: Mac imza ve acilis dogrulamasi
-# Kaynak: depo kokundeki Mac-Derleme-Kaynagi-<surum>.zip (MacKaynakPaketiniHazirla.ps1 uretir).
-# Once Windows surumu ayni numarayla yayinlanmis olmali; Mac paketleri o yayina eklenir.
+name: Yayin (Windows + Mac)
+# Yayin dali yayin/<surum> gonderilince calisir:
+#   windows/  -> Windows kurulum dosyalari (BetaPaketiniHazirla.ps1 ciktisi), notes.md -> yayin notu
+#   Mac-Derleme-Kaynagi-<surum>.zip (depo kokunde) -> Mac kaynaklari (MacKaynakPaketiniHazirla.ps1)
+# Sira: Windows yayini olusur, Mac iki mimaride derlenip imza/acilis testinden gecer, DMG/ZIP ayni yayina eklenir,
+# en sonda gecici yayin dali silinir (buyuk dosyalar depo gecmisinde kalmaz; etiket main'i gosterir).
+# Elle calistirma: yalniz Mac paketlerini var olan bir yayina ekler.
 on:
+  push:
+    branches: ['yayin/**']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Surum (Windows yayiniyla ayni, or. 1.0.1-beta-5)'
+        description: 'Surum (var olan Windows yayini, or. 1.0.1-beta-5)'
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: mac-beta-release
+  group: beta-release
   cancel-in-progress: false
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        env:
+          INPUT: ${{ inputs.version }}
+          REF: ${{ github.ref_name }}
+        run: |
+          VERSION="${INPUT:-${REF#yayin/}}"
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' || { echo "Gecersiz surum: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+  windows:
+    needs: setup
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows yayinini olustur
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          cd windows
+          test "$(ls *Setup.exe | wc -l)" -eq 1
+          test "$(ls *-full.nupkg | wc -l)" -eq 1
+          test -f RELEASES-beta && test -f releases.beta.json
+          grep -q "$VERSION" releases.beta.json || { echo "Windows paketi bu surume ait degil"; exit 1; }
+          if gh release view "v$VERSION" > /dev/null 2>&1; then echo "v$VERSION zaten var"; exit 1; fi
+          gh release create "v$VERSION" *Setup.exe *-full.nupkg RELEASES-beta releases.beta.json \
+            --prerelease --target main --title "Kisisel Asistan $VERSION" --notes-file ../notes.md
+          mkdir ../check && gh release download "v$VERSION" --dir ../check --pattern '*.exe' --pattern '*.nupkg'
+          for f in *Setup.exe *-full.nupkg; do cmp "$f" "../check/$f"; done
   mac:
+    needs: [setup, windows]
+    if: ${{ !cancelled() && needs.setup.result == 'success' && needs.windows.result != 'failure' }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,9 +74,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Incelenmis kaynaklari ac
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
-          case "$VERSION" in *[!A-Za-z0-9.-]*|'') echo "Gecersiz surum"; exit 1;; esac
           unzip -q "Mac-Derleme-Kaynagi-$VERSION.zip" 'outputs/*' -d .
           test "$(node -p "require('./outputs/KisiselAsistan.Mac/package.json').version")" = "$VERSION"
       - uses: actions/setup-node@v4
@@ -65,7 +109,7 @@ jobs:
             outputs/KisiselAsistan.Mac/distribution/${{ matrix.arch }}/*.zip
           if-no-files-found: error
   release:
-    needs: mac
+    needs: [setup, mac]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -75,11 +119,11 @@ jobs:
           pattern: Mac-package-*
           merge-multiple: true
           path: packages
-      - name: Dogrulanmis Mac paketlerini Windows yayinina ekle
+      - name: Dogrulanmis Mac paketlerini yayina ekle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG: v${{ inputs.version }}
+          TAG: v${{ needs.setup.outputs.version }}
         run: |
           cd packages
           test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 2
@@ -91,3 +135,16 @@ jobs:
           gh release download "$TAG" --dir downloaded --pattern '*.dmg' --pattern '*-mac-*.zip' --pattern SHA256SUMS-mac.txt
           cd downloaded
           sha256sum --check SHA256SUMS-mac.txt
+  cleanup:
+    needs: [windows, release]
+    if: ${{ always() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Gecici yayin dalini sil
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$REF"
